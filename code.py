@@ -14,32 +14,33 @@ import torch.nn.functional as F
       
 class args:
     # -------- network --------
-    batch_size = 500
+    batch_size = 256
     lr = 1e-3
     beta1 = 0.9
     beta2 = 0.999
     weight_decay = 5e-4
-    epoch = 100
+    epoch = 30
     factor= 0.1
-    step = [10000]
+    step = [4000,6000]
     # -------- data ---------
     augmentation = None
     preprocess = 'normal'
     train_path = '/kaggle/input/Kannada-MNIST/train.csv'
-    val_path = '../input/Kannada-MNIST/Dig-MNIST.csv'
+    val_path = '/kaggle/input/Kannada-MNIST/Dig-MNIST.csv'
+    test_path = '/kaggle/input/Kannada-MNIST/test.csv'
     #--------- other --------
     print_fre = 1
     gpu = [0]
     
-    
-    
+        
 class SelfDataSet(torch.utils.data.Dataset):
-    def __init__(self,path,augmentation,preprocess):
+    def __init__(self,path,augmentation,preprocess,data_type):
         self.path = path
         self.preprocess = preprocess
         self.augmentation = augmentation
         self.data = pd.read_csv(self.path)
-        self.data2 = self.data.iloc[:,1:].astype('float').values
+        self.data_type = data_type    
+        self.data_image = self.data.iloc[:,1:].astype('float32').values
         self.label = self.data.iloc[:,0].values
     def pre_function(self,ori_img):
         if self.preprocess == 'normal':
@@ -48,11 +49,14 @@ class SelfDataSet(torch.utils.data.Dataset):
             print('error, preprocess type error')
         return ori_img
     def __getitem__(self,index):        
-        ori_img = self.data2[index].reshape(-1,28,28)
-        label_onehot = np.zeros(10, dtype='float32')
-        label_onehot[self.label[index]] =1
+        ori_img = self.data_image[index].reshape(-1,28,28)
         pre_img = self.pre_function(ori_img)
-        return pre_img,label_onehot
+        if self.data_type == 'test':
+            return pre_img
+        else:
+            label_onehot = np.zeros(10, dtype='float32')
+            label_onehot[self.label[index]] = 1
+            return pre_img,label_onehot
     def __len__(self):
         ori_csv = pd.read_csv(self.path).values
         return ori_csv.shape[0]
@@ -61,16 +65,22 @@ class SelfDataSet(torch.utils.data.Dataset):
 def loader_factory(data_type,args):
     if data_type == 'train':
         train_dataset = SelfDataSet(args.train_path,args.augmentation,
-                                args.preprocess)
+                                args.preprocess,'train')
         train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
                                           drop_last=False, num_workers=0,shuffle=True)
         return train_loader
     elif data_type == 'val':
         val_dataset = SelfDataSet(args.val_path,None,
-                                args.preprocess)
+                                args.preprocess,'val')
         val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size,
                                           drop_last=False, num_workers=0,shuffle=False)
         return val_loader
+    elif data_type == 'test':
+         test_dataset = SelfDataSet(args.test_path,None,
+                                args.preprocess,'test')
+         test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size,
+                                          drop_last=False, num_workers=0,shuffle=False)
+         return test_loader
     else: print('error,which kind of data you want?')
 
 
@@ -88,10 +98,10 @@ class Block(nn.Module):
             #nn.BatchNorm2d(out_channel)
         )
         
-    def forward(self,x):
-        
+    def forward(self,x):        
         return self.block(x)
-    
+ 
+
 class CNN(nn.Module):
     def __init__(self):
         super(CNN,self).__init__()
@@ -212,34 +222,42 @@ def get_optimizer(args,net):
                                                        gamma=args.factor,
                                                       last_epoch=-1)
     return optimizer,lr_schedule
+
         
 def print_terminal(loss,i,epoch,len_data,loss_total):
     str_print = 'epoch: [{0}]{1}/{2}'.format(epoch,i,len_data)
     str_print += ' loss: {loss:.5f}({loss_avg:.5f})'.format(loss=loss,loss_avg=loss_total/(i+1e-10))
     print(str_print)
-                    
+          
+        
 # body part
 def main():
     # init
     train_data = loader_factory('train',args)
     val_data = loader_factory('val',args)
-    net = SelfNetwork(args)
-    #net = CNN()
+    test_data = loader_factory('test',args)
+    #net = SelfNetwork(args)
+    net = CNN()
     net = torch.nn.DataParallel(net,args.gpu).cuda()
     loss_function = MyLoss()
     optimizer,lr_schedule = get_optimizer(args,net)
     loss_val_min = np.inf
-    #loss_function = torch.nn.CrossEntropyLoss()
     # train&&val
     for epoch in range(args.epoch):
         # train
         loss_train_total = 0
         len_train = len(train_data)
-        net.train().double()
+        net.train()
+        correct = 0
+        accuracy = 0
         for i,(images, label) in enumerate(train_data):
             images = images.cuda()
             label = label.cuda()
             output = net(images)
+            
+            pred = output.data.max(1 , keepdim=True)[1]            
+            correct += pred.eq(label.max(1, keepdim=True)[1].data.view_as(pred)).sum().cpu().numpy()
+                    
             loss = loss_function(output,label)
             loss_train_total += loss
             optimizer.zero_grad()
@@ -248,10 +266,14 @@ def main():
             lr_schedule.step()
             if i % args.print_fre == 0:
                 print_terminal(loss,i,epoch,len_train,loss_train_total)
+        accuracy = correct / (len_train*args.batch_size)
+        print(accuracy)
         # val
         loss_val_total = 0
         len_val = len(val_data)
-        net.eval()
+        net.eval()  
+        val_correct = 0
+        val_accuracy = 0
         with torch.no_grad():
             for i, (images,label) in enumerate(val_data):
                 images = images.cuda()
@@ -259,8 +281,14 @@ def main():
                 output = net(images)
                 loss = loss_function(output,label)
                 loss_val_total += loss
+                            
+                pred = output.data.max(1 , keepdim=True)[1]
+                val_correct += pred.eq(label.max(1, keepdim=True)[1].data.view_as(pred)).sum().cpu().numpy()
+                           
                 if i%args.print_fre == 0:
                     print_terminal(loss,i,epoch,len_val,loss_val_total)
+            val_accuracy = val_correct / (len_val*args.batch_size)
+            print(val_accuracy)
         loss_val_total /= len(val_data)
         #save
         if loss_val_total < loss_val_min:
@@ -270,7 +298,18 @@ def main():
                'opt_state': optimizer.state_dict(),
                'lr_state': lr_schedule.state_dict()}
             torch.save(states,'best.pth')
-    
+    #test
+    predictions = []
+    with torch.no_grad():
+        for i, images in enumerate(test_data):
+            images = images.cuda()
+            output = net(images).max(dim=1)[1]
+            predictions += list(output.data.cpu().numpy())
+    submission = pd.read_csv('/kaggle/input/Kannada-MNIST/sample_submission.csv')
+    submission['label'] = predictions
+    submission.to_csv('submission.csv', index=False)
+    submission.head()
+            
             
 if __name__=='__main__':
     main()
