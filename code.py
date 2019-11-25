@@ -8,161 +8,174 @@ import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision 
+import torchvision.transforms as transforms
+import math
 
 # Input data files are available in the "../input/" directory.
 # For example, running this (by clicking run or pressing Shift+Enter) will list all files under the input directory
       
 class args:
     # -------- network --------
+    opt = 'sgd'
     batch_size = 256
-    lr = 1e-3
+    lr = 1e-1
     beta1 = 0.9
     beta2 = 0.999
     weight_decay = 5e-4
-    epoch = 30
-    factor= 0.1
-    step = [4000,6000]
+    epoch = 23
+    factor= 0.500
+    step = [1500,2300,2800,3300,3800,4300,4800]
     # -------- data ---------
-    augmentation = None
-    preprocess = 'normal'
     train_path = '/kaggle/input/Kannada-MNIST/train.csv'
     val_path = '/kaggle/input/Kannada-MNIST/Dig-MNIST.csv'
     test_path = '/kaggle/input/Kannada-MNIST/test.csv'
+    result_path = '/kaggle/input/Kannada-MNIST/sample.csv'
+    crop_padding = 3
+    scale = (0.9,1.1)
+    angle = [-15,15]  
     #--------- other --------
-    print_fre = 1
+    print_fre = 20
     gpu = [0]
+    #-------- tricks --------
+    #warm_up
+    #model_embedding
+    #no_bias_decay
+    multi_lr = False
+    #mix_up
+    #cosine lr decay
+    #other preprocess
     
         
-class SelfDataSet(torch.utils.data.Dataset):
-    def __init__(self,path,augmentation,preprocess,data_type):
+class SelfDataSet(torch.utils.data.Dataset):  
+    def __init__(self,path,augmentation,data_type,test_path = None,test_label= None):
         self.path = path
-        self.preprocess = preprocess
         self.augmentation = augmentation
         self.data = pd.read_csv(self.path)
-        self.data_type = data_type    
-        self.data_image = self.data.iloc[:,1:].astype('float32').values
-        self.label = self.data.iloc[:,0].values
-    def pre_function(self,ori_img):
-        if self.preprocess == 'normal':
-            ori_img = ori_img / 255.0 
-        else:
-            print('error, preprocess type error')
-        return ori_img
+        self.data_type = data_type         
+        
+        if self.data_type == 'testtrain':
+            testtrain = pd.read_csv(test_path)
+            testtrainlab = pd.read_csv(test_label)
+            self.data_image = np.concatenate((self.data.iloc[:,1:].values.reshape(-1,28,28),
+                                             testtrain[:,1:].values.reshape(-1,28,28)),0)
+            self.label = np.concatenate((self.data.iloc[:,0].values,testtrainlab.iloc[:,1].values),0)
+            print(self.data_image.shape)
+            print(self.label)
+        else:    
+            self.data_image = self.data.iloc[:,1:].values.reshape(-1,28,28)
+            self.label = self.data.iloc[:,0].values
+                
     def __getitem__(self,index):        
-        ori_img = self.data_image[index].reshape(-1,28,28)
-        pre_img = self.pre_function(ori_img)
+        ori_img = self.data_image[index] 
+        ori_img = np.array(ori_img).astype(np.uint8).reshape(28,28,1)
+        pre_img = self.augmentation(ori_img)
         if self.data_type == 'test':
             return pre_img
         else:
             label_onehot = np.zeros(10, dtype='float32')
             label_onehot[self.label[index]] = 1
             return pre_img,label_onehot
+        
     def __len__(self):
         ori_csv = pd.read_csv(self.path).values
         return ori_csv.shape[0]
     
     
 def loader_factory(data_type,args):
+    
+    transforms_train = transforms.Compose([
+        transforms.ToPILImage(),      
+        #transforms.RandomResizedCrop(28, scale=args.scale, ratio=(1, 1), interpolation=2),
+        #transforms.RandomRotation(args.angle),
+        transforms.ToTensor(),
+    ])
+    transforms_val = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.ToTensor(),
+    ])
+    
     if data_type == 'train':
-        train_dataset = SelfDataSet(args.train_path,args.augmentation,
-                                args.preprocess,'train')
+        train_dataset = SelfDataSet(args.train_path,transforms_train,
+                                    'train')
         train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
                                           drop_last=False, num_workers=0,shuffle=True)
         return train_loader
     elif data_type == 'val':
-        val_dataset = SelfDataSet(args.val_path,None,
-                                args.preprocess,'val')
+        val_dataset = SelfDataSet(args.val_path,transforms_val,
+                                    'val')
         val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size,
                                           drop_last=False, num_workers=0,shuffle=False)
         return val_loader
     elif data_type == 'test':
-         test_dataset = SelfDataSet(args.test_path,None,
-                                args.preprocess,'test')
+         test_dataset = SelfDataSet(args.test_path,transforms_val,
+                                    'test')
          test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size,
                                           drop_last=False, num_workers=0,shuffle=False)
          return test_loader
+    elif data_type == 'testtrain':
+         test_dataset = SelfDataSet(args.train_path,transforms_val,
+                                    'testtrain',args.test_path,args.result_path)
+         test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size,
+                                          drop_last=False, num_workers=0,shuffle=False)
     else: print('error,which kind of data you want?')
 
-
-class Block(nn.Module):
-    def __init__(self,in_channel,out_channel):
-        super(Block,self).__init__()
-                
-        self.block = nn.Sequential(
-            nn.Conv2d(in_channel,out_channel,kernel_size=1),
-            nn.MaxPool2d(kernel_size=3,stride=1,padding=1),
-            nn.LeakyReLU(),
-            nn.Dropout(0.4),
-            nn.Conv2d(out_channel,out_channel,kernel_size=3),
-            nn.MaxPool2d(kernel_size=3,stride=1,padding=1),
-            #nn.BatchNorm2d(out_channel)
-        )
-        
-    def forward(self,x):        
-        return self.block(x)
- 
-
-class CNN(nn.Module):
-    def __init__(self):
-        super(CNN,self).__init__()
-        
-        self.block1 = Block(1,32)
-        self.block2 = Block(32,16)
-        self.block3 = Block(16,8)
-        #self.batchnorm1 = nn.BatchNorm1d(512)
-        #self.batchnorm2 = nn.BatchNorm1d(32)
-        self.fc1 = nn.Linear(3872,1024)
-        self.fc2 = nn.Linear(1024,512)
-        self.fc3 = nn.Linear(512,128)
-        self.fc4 = nn.Linear(128,32)
-        self.fc5 = nn.Linear(32,10)
-
-    def forward(self,x):
-        
-        x = self.block1(x)
-        x = self.block2(x)
-        x = self.block3(x)
-        x = x.view(x.size(0),-1)
-        x = F.leaky_relu(self.fc1(x))
-        x = F.leaky_relu(self.fc2(x))
-        #x = self.batchnorm1(x)
-        x = F.leaky_relu(self.fc3(x))
-        x = F.leaky_relu(self.fc4(x))
-        #x = self.batchnorm2(x)
-        x = torch.nn.functional.log_softmax(self.fc5(x),dim=-1)        
-        return x
-       
-        
         
 class SelfNetwork(torch.nn.Module):
     def __init__(self,args):
         super(SelfNetwork,self).__init__()
-        self.conv1 = torch.nn.Conv2d(1,32,3,1,1)
-        self.relu1 = torch.nn.ReLU(inplace=True)
-        self.conv2 = torch.nn.Conv2d(32,32,3,1,1)
-        self.relu2 = torch.nn.ReLU(inplace=True)
-        self.pool1 = torch.nn.MaxPool2d(2,2)
-        
-        self.conv3 = torch.nn.Conv2d(32,32,3,1,1)
-        self.relu3 = torch.nn.ReLU(inplace=True)
-        self.conv4 = torch.nn.Conv2d(32,32,3,1,1)
-        self.relu4 = torch.nn.ReLU(inplace=True)
-        self.pool2 = torch.nn.MaxPool2d(2,2)
-        
-        self.conv5 = torch.nn.Conv2d(32,32,3,1,1)
-        self.relu5 = torch.nn.ReLU(inplace=True)
-        self.conv6 = torch.nn.Conv2d(32,32,3,1,1)
-        self.relu6 = torch.nn.ReLU(inplace=True)
-        self.conv61 = torch.nn.Conv2d(32,64,3,1,1)
-        self.relu61 = torch.nn.ReLU(inplace=True)
-        self.conv62 = torch.nn.Conv2d(64,64,3,1,1)
-        self.relu62 = torch.nn.ReLU(inplace=True)
-        self.pool3 = torch.nn.MaxPool2d(2,2)
-        
-        self.full1 = torch.nn.Linear(9*64,256)
-        self.relu7 = torch.nn.ReLU(inplace=True)
-        self.full2 = torch.nn.Linear(256,10)
-        self.initilization()
+        self.net_cnn = nn.Sequential(
+            nn.Conv2d(1,32,3,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(32),
+            nn.Conv2d(32,32,3,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(32),
+            
+            nn.Conv2d(32,32,3,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(32),
+            nn.Conv2d(32,32,3,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(32),
+            nn.Dropout(0.4),
+            nn.Conv2d(32,64,3,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(64),
+            nn.Conv2d(64,64,3,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(64),
+            nn.Dropout(0.4),
+            
+            
+            nn.Conv2d(64,64,3,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(64),
+            nn.Conv2d(64,64,3,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(64),
+            nn.Conv2d(64,64,3,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(64),
+            nn.Dropout(0.4),
+            nn.Conv2d(64,64,3,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(64),
+            nn.Conv2d(64,64,3,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(64),
+            nn.Conv2d(64,64,3,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(64),
+            nn.Dropout(0.4),
+            
+            nn.Conv2d(64,128,4,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(128),
+            nn.Dropout(0.4),   
+        )
+        self.fc1 = nn.Linear(128,10)
+        #self.initilization()
         
     def initilization(self):# init checked
         for m in self.modules():
@@ -172,33 +185,9 @@ class SelfNetwork(torch.nn.Module):
                     torch.nn.init.constant_(m.bias,0.0)
           
     def forward(self,input_):
-        x = self.conv1(input_)
-        x = self.relu1(x)
-        x = self.conv2(x)
-        x = self.relu2(x)
-        x = self.pool1(x)
-        
-        x = self.conv3(x)
-        x = self.relu3(x)
-        x = self.conv4(x)
-        x = self.relu4(x)
-        x = self.pool2(x)
-        
-        x = self.conv5(x)
-        x = self.relu5(x)
-        x = self.conv6(x)
-        x = self.relu6(x)
-        x = self.conv61(x)
-        x = self.relu61(x)
-        x = self.conv62(x)
-        x = self.relu62(x)
-        x = self.pool3(x)
-        
+        x = self.net_cnn(input_)       
         x = x.view(x.size(0),-1)
-        
-        x = self.full1(x)   
-        x = self.relu7(x)
-        x = torch.nn.functional.log_softmax(self.full2(x),dim=-1)     
+        x = torch.nn.functional.log_softmax(self.fc1(x),dim=-1)     
         return x
 
 
@@ -213,11 +202,30 @@ class MyLoss(torch.nn.Module):
         
         
 def get_optimizer(args,net):
-    train_vars = [param for param in net.parameters() if param.requires_grad]
-    optimizer = torch.optim.Adam(train_vars,lr=args.lr,
+    
+    if args.multi_lr:
+        decay_1, no_decay_2 = [],[]
+        for name, param in net.named_parameters():           
+            if name.endswith(".bias"):
+                print(name[7:],"using no_decay_2")
+                no_decay_2.append(param)
+            else:
+                decay_1.append(param)
+        train_vars = [{'params': decay_1, 'lr': args.lr, 'weight_decay':args.weight_decay},
+                     {'params': no_decay_2, 'lr': args.lr, 'weight_decay':0},]
+    else:
+        train_vars = [param for param in net.parameters() if param.requires_grad]
+                
+    if args.opt == 'adam':
+        optimizer = torch.optim.Adam(train_vars,lr=args.lr,
                                 betas=(args.beta1, args.beta2),
                                 eps=1e-08, 
                                 weight_decay=args.weight_decay,)
+    elif args.opt == 'sgd':
+        optimizer = torch.optim.SGD(train_vars,lr=args.lr,
+                                momentum=args.beta1,
+                                weight_decay=args.weight_decay,)
+    else: print('optimizer type error')
     lr_schedule = torch.optim.lr_scheduler.MultiStepLR(optimizer,args.step,
                                                        gamma=args.factor,
                                                       last_epoch=-1)
@@ -232,12 +240,18 @@ def print_terminal(loss,i,epoch,len_data,loss_total):
         
 # body part
 def main():
+    SEED = 0
+    torch.manual_seed(SEED)
+    torch.cuda.manual_seed(SEED)
+    torch.backends.cudnn.deterministic = True
+    np.random.seed(SEED)
     # init
     train_data = loader_factory('train',args)
     val_data = loader_factory('val',args)
     test_data = loader_factory('test',args)
-    #net = SelfNetwork(args)
-    net = CNN()
+    
+    net = SelfNetwork(args)
+    #net = CNN()
     net = torch.nn.DataParallel(net,args.gpu).cuda()
     loss_function = MyLoss()
     optimizer,lr_schedule = get_optimizer(args,net)
@@ -309,6 +323,56 @@ def main():
     submission['label'] = predictions
     submission.to_csv('submission.csv', index=False)
     submission.head()
+    
+    
+    traintest_data = loader_factory('traintest',args)
+    for epoch in range(args.epoch):
+        # train
+        loss_train_total = 0
+        len_train = len(traintest_data)
+        net.train()
+        correct = 0
+        accuracy = 0
+        for i,(images, label) in enumerate(traintest_data):
+            images = images.cuda()
+            label = label.cuda()
+            output = net(images)
+            
+            pred = output.data.max(1 , keepdim=True)[1]            
+            correct += pred.eq(label.max(1, keepdim=True)[1].data.view_as(pred)).sum().cpu().numpy()
+                    
+            loss = loss_function(output,label)
+            loss_train_total += loss
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            lr_schedule.step()
+            if i % args.print_fre == 0:
+                print_terminal(loss,i,epoch,len_train,loss_train_total)
+        accuracy = correct / (len_train*args.batch_size)
+        print(accuracy)
+        # val
+        loss_val_total = 0
+        len_val = len(val_data)
+        net.eval()  
+        val_correct = 0
+        val_accuracy = 0
+        with torch.no_grad():
+            for i, (images,label) in enumerate(val_data):
+                images = images.cuda()
+                label = label.cuda()
+                output = net(images)
+                loss = loss_function(output,label)
+                loss_val_total += loss
+                            
+                pred = output.data.max(1 , keepdim=True)[1]
+                val_correct += pred.eq(label.max(1, keepdim=True)[1].data.view_as(pred)).sum().cpu().numpy()
+                           
+                if i%args.print_fre == 0:
+                    print_terminal(loss,i,epoch,len_val,loss_val_total)
+            val_accuracy = val_correct / (len_val*args.batch_size)
+            print(val_accuracy)
+        loss_val_total /= len(val_data)
             
             
 if __name__=='__main__':
