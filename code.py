@@ -17,25 +17,25 @@ import math
       
 class args:
     # -------- network --------
-    opt = 'sgd'
+    opt = 'adam'
     batch_size = 256
-    lr = 1e-1
+    lr = 1e-3
     beta1 = 0.9
     beta2 = 0.999
     weight_decay = 5e-4
-    epoch = 23
-    factor= 0.500
-    step = [1500,2300,2800,3300,3800,4300,4800]
+    epoch = 15
+    factor= 0.100
+    step = [2000,3000]
     # -------- data ---------
     train_path = '/kaggle/input/Kannada-MNIST/train.csv'
     val_path = '/kaggle/input/Kannada-MNIST/Dig-MNIST.csv'
     test_path = '/kaggle/input/Kannada-MNIST/test.csv'
-    result_path = '/kaggle/input/Kannada-MNIST/sample.csv'
+    result_path = './submission2.csv'
     crop_padding = 3
     scale = (0.9,1.1)
     angle = [-15,15]  
     #--------- other --------
-    print_fre = 20
+    print_fre = 40
     gpu = [0]
     #-------- tricks --------
     #warm_up
@@ -52,19 +52,19 @@ class SelfDataSet(torch.utils.data.Dataset):
         self.path = path
         self.augmentation = augmentation
         self.data = pd.read_csv(self.path)
-        self.data_type = data_type         
-        
-        if self.data_type == 'testtrain':
+        self.data_type = data_type 
+        if  self.data_type == 'test_train':
             testtrain = pd.read_csv(test_path)
             testtrainlab = pd.read_csv(test_label)
             self.data_image = np.concatenate((self.data.iloc[:,1:].values.reshape(-1,28,28),
-                                             testtrain[:,1:].values.reshape(-1,28,28)),0)
+                                              testtrain.iloc[:,1:].values.reshape(-1,28,28)),0)
             self.label = np.concatenate((self.data.iloc[:,0].values,testtrainlab.iloc[:,1].values),0)
-            print(self.data_image.shape)
-            print(self.label)
         else:    
             self.data_image = self.data.iloc[:,1:].values.reshape(-1,28,28)
             self.label = self.data.iloc[:,0].values
+            
+            
+        
                 
     def __getitem__(self,index):        
         ori_img = self.data_image[index] 
@@ -78,9 +78,8 @@ class SelfDataSet(torch.utils.data.Dataset):
             return pre_img,label_onehot
         
     def __len__(self):
-        ori_csv = pd.read_csv(self.path).values
-        return ori_csv.shape[0]
-    
+        return self.label.shape[0]
+
     
 def loader_factory(data_type,args):
     
@@ -113,11 +112,12 @@ def loader_factory(data_type,args):
          test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size,
                                           drop_last=False, num_workers=0,shuffle=False)
          return test_loader
-    elif data_type == 'testtrain':
-         test_dataset = SelfDataSet(args.train_path,transforms_val,
-                                    'testtrain',args.test_path,args.result_path)
-         test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size,
-                                          drop_last=False, num_workers=0,shuffle=False)
+    elif data_type == 'test_train':
+         train_test_dataset = SelfDataSet(args.train_path,transforms_train,'test_train',
+                                    args.test_path,args.result_path)
+         train_test_loader = torch.utils.data.DataLoader(train_test_dataset, batch_size=args.batch_size,
+                                          drop_last=False, num_workers=0,shuffle=True)
+         return train_test_loader
     else: print('error,which kind of data you want?')
 
         
@@ -125,6 +125,36 @@ class SelfNetwork(torch.nn.Module):
     def __init__(self,args):
         super(SelfNetwork,self).__init__()
         self.net_cnn = nn.Sequential(
+            nn.Conv2d(1,32,3,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(32),
+            nn.Conv2d(32,32,3,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(32),
+            
+            nn.Conv2d(32,32,5,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(32),
+            nn.Dropout(0.4),
+            nn.Conv2d(32,64,5,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(64),
+            
+            nn.Conv2d(64,64,7,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(64),
+            nn.Conv2d(64,64,7,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(64),
+            nn.Dropout(0.4),
+            
+            nn.Conv2d(64,128,4,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(128),
+            nn.Dropout(0.4),   
+        )
+        self.fc1 = nn.Linear(128,10)
+        '''self.net_cnn = nn.Sequential(
             nn.Conv2d(1,32,3,1,0),
             nn.LeakyReLU(),
             nn.BatchNorm2d(32),
@@ -174,7 +204,7 @@ class SelfNetwork(torch.nn.Module):
             nn.BatchNorm2d(128),
             nn.Dropout(0.4),   
         )
-        self.fc1 = nn.Linear(128,10)
+        self.fc1 = nn.Linear(128,10)'''
         #self.initilization()
         
     def initilization(self):# init checked
@@ -321,32 +351,39 @@ def main():
             predictions += list(output.data.cpu().numpy())
     submission = pd.read_csv('/kaggle/input/Kannada-MNIST/sample_submission.csv')
     submission['label'] = predictions
-    submission.to_csv('submission.csv', index=False)
+    submission.to_csv('submission2.csv', index=False)
     submission.head()
     
     
-    traintest_data = loader_factory('traintest',args)
+    traintest_data = loader_factory('test_train',args)
+    net2 = SelfNetwork(args)
+    #net = CNN()
+    net2 = torch.nn.DataParallel(net2,args.gpu).cuda()
+    optimizer2,lr_schedule2 = get_optimizer(args,net2)
+    loss_val_min = np.inf
+    print('start')
     for epoch in range(args.epoch):
         # train
         loss_train_total = 0
         len_train = len(traintest_data)
-        net.train()
+        print(len_train)
+        net2.train()
         correct = 0
         accuracy = 0
         for i,(images, label) in enumerate(traintest_data):
             images = images.cuda()
             label = label.cuda()
-            output = net(images)
+            output = net2(images)
             
             pred = output.data.max(1 , keepdim=True)[1]            
             correct += pred.eq(label.max(1, keepdim=True)[1].data.view_as(pred)).sum().cpu().numpy()
                     
             loss = loss_function(output,label)
             loss_train_total += loss
-            optimizer.zero_grad()
+            optimizer2.zero_grad()
             loss.backward()
-            optimizer.step()
-            lr_schedule.step()
+            optimizer2.step()
+            lr_schedule2.step()
             if i % args.print_fre == 0:
                 print_terminal(loss,i,epoch,len_train,loss_train_total)
         accuracy = correct / (len_train*args.batch_size)
@@ -354,14 +391,14 @@ def main():
         # val
         loss_val_total = 0
         len_val = len(val_data)
-        net.eval()  
+        net2.eval()  
         val_correct = 0
         val_accuracy = 0
         with torch.no_grad():
             for i, (images,label) in enumerate(val_data):
                 images = images.cuda()
                 label = label.cuda()
-                output = net(images)
+                output = net2(images)
                 loss = loss_function(output,label)
                 loss_val_total += loss
                             
@@ -373,6 +410,17 @@ def main():
             val_accuracy = val_correct / (len_val*args.batch_size)
             print(val_accuracy)
         loss_val_total /= len(val_data)
+        
+    predictions = []
+    with torch.no_grad():
+        for i, images in enumerate(test_data):
+            images = images.cuda()
+            output = net2(images).max(dim=1)[1]
+            predictions += list(output.data.cpu().numpy())
+    submission = pd.read_csv('/kaggle/input/Kannada-MNIST/sample_submission.csv')
+    submission['label'] = predictions
+    submission.to_csv('submission.csv', index=False)
+    submission.head()
             
             
 if __name__=='__main__':
