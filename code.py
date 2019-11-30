@@ -5,12 +5,14 @@
 import os
 import numpy as np # linear algebra
 import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
+
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision 
 import torchvision.transforms as transforms
-import math
+from sklearn.model_selection import train_test_split
 
 # Input data files are available in the "../input/" directory.
 # For example, running this (by clicking run or pressing Shift+Enter) will list all files under the input directory
@@ -18,7 +20,7 @@ import math
 class args:
     # -------- network --------
     opt = 'adam'
-    batch_size = 256
+    batch_size = 256#16
     lr = 1e-3
     beta1 = 0.9
     beta2 = 0.999
@@ -47,38 +49,41 @@ class args:
     #other preprocess
     
         
-class SelfDataSet(torch.utils.data.Dataset):  
-    def __init__(self,path,augmentation,data_type,test_path = None,test_label= None):
-        self.path = path
+class SelfDataSet(torch.utils.data.Dataset):
+    
+    def __init__(self,images, labels = None, augmentation = None,test_data = None,test_label= None): 
         self.augmentation = augmentation
-        self.data = pd.read_csv(self.path)
-        self.data_type = data_type 
-        if  self.data_type == 'test_train':
-            testtrain = pd.read_csv(test_path)
-            testtrainlab = pd.read_csv(test_label)
-            self.data_image = np.concatenate((self.data.iloc[:,1:].values.reshape(-1,28,28),
-                                              testtrain.iloc[:,1:].values.reshape(-1,28,28)),0)
-            self.label = np.concatenate((self.data.iloc[:,0].values,testtrainlab.iloc[:,1].values),0)
-        else:    
-            self.data_image = self.data.iloc[:,1:].values.reshape(-1,28,28)
-            self.label = self.data.iloc[:,0].values
-            
-            
-        
-                
-    def __getitem__(self,index):        
+        if  test_data is not None:# for semi-supervise learning
+            self.data_image = np.concatenate((np.array(images.iloc[:,:],dtype='uint8').reshape(-1,28,28,1),
+                                              np.array(test_data.iloc[:,:],dtype='uint8').reshape(-1,28,28,1)),0)
+            self.label = np.concatenate((np.array(labels.iloc[:],dtype='float32'),
+                                         np.array(test_label.iloc[:],dtype='float32')),0)
+        elif labels is not None:
+            self.data_image = np.array(images.iloc[:,:],dtype='uint8').reshape(-1,28,28,1)
+          # values useless
+            self.label = np.array(labels.iloc[:])
+           
+        else:
+            self.data_image = np.array(images.iloc[:,:],dtype='uint8').reshape(-1,28,28,1)
+            self.label = None
+                                  
+    def __getitem__(self,index):
+        #print('here')
         ori_img = self.data_image[index] 
-        ori_img = np.array(ori_img).astype(np.uint8).reshape(28,28,1)
-        pre_img = self.augmentation(ori_img)
-        if self.data_type == 'test':
+        #print('here2')
+        pre_img = self.augmentation(ori_img)    
+        if self.label is None:
             return pre_img
         else:
             label_onehot = np.zeros(10, dtype='float32')
+            #print('here3')
+           # print(self.label.shape)
             label_onehot[self.label[index]] = 1
+            #print('here4')
             return pre_img,label_onehot
         
-    def __len__(self):
-        return self.label.shape[0]
+    def __len__(self): 
+        return self.data_image.shape[0]
 
     
 def loader_factory(data_type,args):
@@ -94,36 +99,91 @@ def loader_factory(data_type,args):
         transforms.ToTensor(),
     ])
     
-    if data_type == 'train':
-        train_dataset = SelfDataSet(args.train_path,transforms_train,
-                                    'train')
+    if data_type == 'train&&val':
+        ori_data = pd.read_csv(args.train_path)
+        ori_label = ori_data['label']
+        ori_data.drop('label',axis=1,inplace=True)
+        
+        train_image, val_image, train_label, val_label = train_test_split(ori_data,ori_label,
+                                                          stratify=ori_label, random_state = 0,
+                                                          test_size = 0.005)
+        train_dataset = SelfDataSet(train_image,train_label,transforms_train)
+        
+        val_dataset = SelfDataSet(val_image,val_label,transforms_val)
+       
         train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
                                           drop_last=False, num_workers=0,shuffle=True)
-        return train_loader
-    elif data_type == 'val':
-        val_dataset = SelfDataSet(args.val_path,transforms_val,
-                                    'val')
         val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size,
-                                          drop_last=False, num_workers=0,shuffle=False)
-        return val_loader
+                                          drop_last=False, num_workers=0,shuffle=False)   
+        return train_loader,val_loader
+
     elif data_type == 'test':
-         test_dataset = SelfDataSet(args.test_path,transforms_val,
-                                    'test')
+         ori_data = pd.read_csv(args.test_path)
+         ori_data.drop('id',axis=1,inplace=True)
+    
+        
+         test_dataset = SelfDataSet(ori_data,None,transforms_val)
          test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size,
                                           drop_last=False, num_workers=0,shuffle=False)
          return test_loader
+        
     elif data_type == 'test_train':
-         train_test_dataset = SelfDataSet(args.train_path,transforms_train,'test_train',
-                                    args.test_path,args.result_path)
+         ori_data = pd.read_csv(args.train_path)
+         ori_label = ori_data['label']
+         ori_data.drop('label',axis=1,inplace=True)
+         test_data = pd.read_csv(args.test_path)
+         test_data.drop('label',axis=1,inplace=True)
+         test_label = pd.read_csv(args.results_path)    
+         test_label.drop('id',axis=1,inplace=True)
+            
+         train_test_dataset = SelfDataSet(ori_data,ori_label,transforms_train,test_data,test_label)
          train_test_loader = torch.utils.data.DataLoader(train_test_dataset, batch_size=args.batch_size,
                                           drop_last=False, num_workers=0,shuffle=True)
          return train_test_loader
+        
     else: print('error,which kind of data you want?')
 
+
         
-class SelfNetwork(torch.nn.Module):
+class DenseBlock3(torch.nn.Module):
+    def __init__(self,in_dim,channels):
+        super(DenseBlock3,self).__init__()
+        self.conv1 = nn.Sequential(nn.Conv2d(in_dim,channels,3,1,0),
+                                   nn.LeakyReLU(),
+                                   nn.BatchNorm2d(channels))
+        self.conv2 = nn.Sequential(nn.Conv2d(channels,channels,3,1,0),
+                                   nn.LeakyReLU(),
+                                   nn.BatchNorm2d(channels))
+        self.conv3 = nn.Sequential(nn.Conv2d(channels,channels,3,1,0),
+                                   nn.LeakyReLU(),
+                                   nn.BatchNorm2d(channels))
+        # pass self init
+    def forward(self,input_):
+        x0 = self.conv1(input_)
+        x1 = self.conv2(x0)
+        x2 = self.conv3(x1)
+        x_out = torch.cat((x0,x1,x2),1)
+        return x_out
+    
+class DenseBlock2(torch.nn.Module):
+    def __init__(self,in_dim,channels):
+        super(DenseBlock2,self).__init__()
+        self.conv1 = nn.Sequential(nn.Conv2d(in_dim,channels,3,1,0),
+                                    nn.LeakyReLU(),
+                                    nn.BatchNorm2d(channels))
+        self.conv2 = nn.Sequential(nn.Conv2d(channels,channels,3,1,0),
+                                    nn.LeakyReLU(),
+                                    nn.BatchNorm2d(channels))
+        # pass self init
+    def forward(self,input_):
+        x0 = self.conv1(input_)
+        x1 = self.conv2(x0)
+        x_out = torch.cat((x0,x1),1)
+        return x_out
+
+class SelfDenseNet(torch.nn.Module):
     def __init__(self,args):
-        super(SelfNetwork,self).__init__()
+        super(SelfDenseNet,self).__init__()
         self.net_cnn = nn.Sequential(
             nn.Conv2d(1,32,3,1,0),
             nn.LeakyReLU(),
@@ -132,23 +192,59 @@ class SelfNetwork(torch.nn.Module):
             nn.LeakyReLU(),
             nn.BatchNorm2d(32),
             
-            nn.Conv2d(32,32,5,1,0),
+            DenseBlock2(32,32),
+            nn.Dropout(0.4),
+            DenseBlock2(96,32),
+            
+            DenseBlock3(96,64),
+            DenseBlock3(64*3,64),
+            nn.Dropout(0.4),
+            
+            nn.Conv2d(64*3,128,4,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(128),
+            nn.Dropout(0.4),   
+        )
+        self.fc1 = nn.Linear(128,10)
+        
+    def forward(self,input_):
+        x = self.net_cnn(input_)       
+        x = x.view(x.size(0),-1)
+        x = torch.nn.functional.log_softmax(self.fc1(x),dim=-1)     
+        return x
+        
+class SelfNetwork(torch.nn.Module):
+    def __init__(self,args):
+        super(SelfNetwork,self).__init__()
+        self.net_cnn = nn.Sequential(
+            nn.Conv2d(1,32,3,1,1),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(32),
+            nn.Conv2d(32,32,3,1,1),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(32),
+            nn.MaxPool2d(2,2),
+            
+            nn.Conv2d(32,32,5,1,2),
             nn.LeakyReLU(),
             nn.BatchNorm2d(32),
             nn.Dropout(0.4),
-            nn.Conv2d(32,64,5,1,0),
+            nn.Conv2d(32,64,5,1,2),
             nn.LeakyReLU(),
             nn.BatchNorm2d(64),
+            nn.MaxPool2d(2,2),
             
-            nn.Conv2d(64,64,7,1,0),
+            
+            nn.Conv2d(64,64,7,1,3),
             nn.LeakyReLU(),
             nn.BatchNorm2d(64),
-            nn.Conv2d(64,64,7,1,0),
+            nn.Conv2d(64,64,7,1,3),
             nn.LeakyReLU(),
             nn.BatchNorm2d(64),
             nn.Dropout(0.4),
+            nn.MaxPool2d(2,2),
             
-            nn.Conv2d(64,128,4,1,0),
+            nn.Conv2d(64,128,3,1,0),
             nn.LeakyReLU(),
             nn.BatchNorm2d(128),
             nn.Dropout(0.4),   
@@ -225,7 +321,8 @@ class MyLoss(torch.nn.Module):
     def __init__(self):
         super().__init__()
     
-    def forward(self,x,y):        
+    def forward(self,x,y):
+        #TODO: here add focus loss
         loss = -(y*torch.nn.functional.log_softmax(x, dim=1) + 1e-10).cpu().sum(1)
         loss = loss.mean()
         return loss
@@ -276,11 +373,11 @@ def main():
     torch.backends.cudnn.deterministic = True
     np.random.seed(SEED)
     # init
-    train_data = loader_factory('train',args)
-    val_data = loader_factory('val',args)
+    train_data,val_data = loader_factory('train&&val',args)
     test_data = loader_factory('test',args)
     
     net = SelfNetwork(args)
+    #net = SelfDenseNet(args)
     #net = CNN()
     net = torch.nn.DataParallel(net,args.gpu).cuda()
     loss_function = MyLoss()
@@ -351,76 +448,76 @@ def main():
             predictions += list(output.data.cpu().numpy())
     submission = pd.read_csv('/kaggle/input/Kannada-MNIST/sample_submission.csv')
     submission['label'] = predictions
-    submission.to_csv('submission2.csv', index=False)
-    submission.head()
-    
-    
-    traintest_data = loader_factory('test_train',args)
-    net2 = SelfNetwork(args)
-    #net = CNN()
-    net2 = torch.nn.DataParallel(net2,args.gpu).cuda()
-    optimizer2,lr_schedule2 = get_optimizer(args,net2)
-    loss_val_min = np.inf
-    print('start')
-    for epoch in range(args.epoch):
-        # train
-        loss_train_total = 0
-        len_train = len(traintest_data)
-        print(len_train)
-        net2.train()
-        correct = 0
-        accuracy = 0
-        for i,(images, label) in enumerate(traintest_data):
-            images = images.cuda()
-            label = label.cuda()
-            output = net2(images)
-            
-            pred = output.data.max(1 , keepdim=True)[1]            
-            correct += pred.eq(label.max(1, keepdim=True)[1].data.view_as(pred)).sum().cpu().numpy()
-                    
-            loss = loss_function(output,label)
-            loss_train_total += loss
-            optimizer2.zero_grad()
-            loss.backward()
-            optimizer2.step()
-            lr_schedule2.step()
-            if i % args.print_fre == 0:
-                print_terminal(loss,i,epoch,len_train,loss_train_total)
-        accuracy = correct / (len_train*args.batch_size)
-        print(accuracy)
-        # val
-        loss_val_total = 0
-        len_val = len(val_data)
-        net2.eval()  
-        val_correct = 0
-        val_accuracy = 0
-        with torch.no_grad():
-            for i, (images,label) in enumerate(val_data):
-                images = images.cuda()
-                label = label.cuda()
-                output = net2(images)
-                loss = loss_function(output,label)
-                loss_val_total += loss
-                            
-                pred = output.data.max(1 , keepdim=True)[1]
-                val_correct += pred.eq(label.max(1, keepdim=True)[1].data.view_as(pred)).sum().cpu().numpy()
-                           
-                if i%args.print_fre == 0:
-                    print_terminal(loss,i,epoch,len_val,loss_val_total)
-            val_accuracy = val_correct / (len_val*args.batch_size)
-            print(val_accuracy)
-        loss_val_total /= len(val_data)
-        
-    predictions = []
-    with torch.no_grad():
-        for i, images in enumerate(test_data):
-            images = images.cuda()
-            output = net2(images).max(dim=1)[1]
-            predictions += list(output.data.cpu().numpy())
-    submission = pd.read_csv('/kaggle/input/Kannada-MNIST/sample_submission.csv')
-    submission['label'] = predictions
     submission.to_csv('submission.csv', index=False)
     submission.head()
+    
+    
+#     traintest_data = loader_factory('test_train',args)
+#     net2 = SelfNetwork(args)
+#     #net = CNN()
+#     net2 = torch.nn.DataParallel(net2,args.gpu).cuda()
+#     optimizer2,lr_schedule2 = get_optimizer(args,net2)
+#     loss_val_min = np.inf
+#     print('start')
+#     for epoch in range(args.epoch):
+#         # train
+#         loss_train_total = 0
+#         len_train = len(traintest_data)
+#         print(len_train)
+#         net2.train()
+#         correct = 0
+#         accuracy = 0
+#         for i,(images, label) in enumerate(traintest_data):
+#             images = images.cuda()
+#             label = label.cuda()
+#             output = net2(images)
+            
+#             pred = output.data.max(1 , keepdim=True)[1]            
+#             correct += pred.eq(label.max(1, keepdim=True)[1].data.view_as(pred)).sum().cpu().numpy()
+                    
+#             loss = loss_function(output,label)
+#             loss_train_total += loss
+#             optimizer2.zero_grad()
+#             loss.backward()
+#             optimizer2.step()
+#             lr_schedule2.step()
+#             if i % args.print_fre == 0:
+#                 print_terminal(loss,i,epoch,len_train,loss_train_total)
+#         accuracy = correct / (len_train*args.batch_size)
+#         print(accuracy)
+#         # val
+#         loss_val_total = 0
+#         len_val = len(val_data)
+#         net2.eval()  
+#         val_correct = 0
+#         val_accuracy = 0
+#         with torch.no_grad():
+#             for i, (images,label) in enumerate(val_data):
+#                 images = images.cuda()
+#                 label = label.cuda()
+#                 output = net2(images)
+#                 loss = loss_function(output,label)
+#                 loss_val_total += loss
+                            
+#                 pred = output.data.max(1 , keepdim=True)[1]
+#                 val_correct += pred.eq(label.max(1, keepdim=True)[1].data.view_as(pred)).sum().cpu().numpy()
+                           
+#                 if i%args.print_fre == 0:
+#                     print_terminal(loss,i,epoch,len_val,loss_val_total)
+#             val_accuracy = val_correct / (len_val*args.batch_size)
+#             print(val_accuracy)
+#         loss_val_total /= len(val_data)
+        
+#     predictions = []
+#     with torch.no_grad():
+#         for i, images in enumerate(test_data):
+#             images = images.cuda()
+#             output = net2(images).max(dim=1)[1]
+#             predictions += list(output.data.cpu().numpy())
+#     submission = pd.read_csv('/kaggle/input/Kannada-MNIST/sample_submission.csv')
+#     submission['label'] = predictions
+#     submission.to_csv('submission.csv', index=False)
+#     submission.head()
             
             
 if __name__=='__main__':
