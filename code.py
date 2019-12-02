@@ -25,9 +25,9 @@ class args:
     beta1 = 0.9
     beta2 = 0.999
     weight_decay = 5e-4
-    epoch = 15
+    epoch = 35
     factor= 0.100
-    step = [2000,3000]
+    step = [20000,30000]
     # -------- data ---------
     train_path = '/kaggle/input/Kannada-MNIST/train.csv'
     val_path = '/kaggle/input/Kannada-MNIST/Dig-MNIST.csv'
