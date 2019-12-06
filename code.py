@@ -6,6 +6,7 @@ import os
 import numpy as np # linear algebra
 import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
 
+import random
 import math
 import torch
 import torch.nn as nn
@@ -14,30 +15,36 @@ import torchvision
 import torchvision.transforms as transforms
 from sklearn.model_selection import train_test_split
 
+
 # Input data files are available in the "../input/" directory.
 # For example, running this (by clicking run or pressing Shift+Enter) will list all files under the input directory
       
 class args:
     # -------- network --------
-    opt = 'adam'
-    batch_size = 256#16
-    lr = 1e-3
+    opt = 'rms'
+    batch_size = 1024#256#16
+    lr = 5e-3
     beta1 = 0.9
     beta2 = 0.999
-    weight_decay = 5e-4
-    epoch = 35
-    factor= 0.100
-    step = [20000,30000]
+    weight_decay = 0#1e-4
+    epoch = 62
+    factor= 0.2
+    step = [2200,2700,2950]
+    patience = 4
+    auto_lr_type = 'ms'
     # -------- data ---------
     train_path = '/kaggle/input/Kannada-MNIST/train.csv'
     val_path = '/kaggle/input/Kannada-MNIST/Dig-MNIST.csv'
     test_path = '/kaggle/input/Kannada-MNIST/test.csv'
     result_path = './submission2.csv'
     crop_padding = 3
-    scale = (0.9,1.1)
-    angle = [-15,15]  
+    scale = (0.75,1.25)
+    shear = 0.1
+    shift = (0.25,0.25)
+    angle = (-10,10)
+    split = 0.1
     #--------- other --------
-    print_fre = 40
+    print_fre = 50
     gpu = [0]
     #-------- tricks --------
     #warm_up
@@ -89,7 +96,9 @@ class SelfDataSet(torch.utils.data.Dataset):
 def loader_factory(data_type,args):
     
     transforms_train = transforms.Compose([
-        transforms.ToPILImage(),      
+        transforms.ToPILImage(),
+        transforms.RandomAffine(args.angle, translate=args.shift, scale=args.scale,
+                                shear=args.shear, resample=False, fillcolor=0),
         #transforms.RandomResizedCrop(28, scale=args.scale, ratio=(1, 1), interpolation=2),
         #transforms.RandomRotation(args.angle),
         transforms.ToTensor(),
@@ -104,23 +113,26 @@ def loader_factory(data_type,args):
         ori_label = ori_data['label']
         ori_data.drop('label',axis=1,inplace=True)
         
-        train_image, val_image, train_label, val_label = train_test_split(ori_data,ori_label,
-                                                          stratify=ori_label, random_state = 0,
-                                                          test_size = 0.005)
-        train_dataset = SelfDataSet(train_image,train_label,transforms_train)
-        
-        val_dataset = SelfDataSet(val_image,val_label,transforms_val)
-       
-        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
+        if args.split == 0:
+            val_loader = 0
+            train_dataset = SelfDataSet(ori_data,ori_label,transforms_train)
+            train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
                                           drop_last=False, num_workers=0,shuffle=True)
-        val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size,
+        else:
+            train_image, val_image, train_label, val_label = train_test_split(ori_data,ori_label,
+                                                          stratify=ori_label, random_state = 42,
+                                                          test_size = args.split,)
+            train_dataset = SelfDataSet(train_image,train_label,transforms_train)
+            train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
+                                                       drop_last=False, num_workers=0,shuffle=True)
+            val_dataset = SelfDataSet(val_image,val_label,transforms_val)
+            val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size,
                                           drop_last=False, num_workers=0,shuffle=False)   
         return train_loader,val_loader
 
     elif data_type == 'test':
          ori_data = pd.read_csv(args.test_path)
-         ori_data.drop('id',axis=1,inplace=True)
-    
+         ori_data.drop('id',axis=1,inplace=True)   
         
          test_dataset = SelfDataSet(ori_data,None,transforms_val)
          test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size,
@@ -148,13 +160,13 @@ def loader_factory(data_type,args):
 class DenseBlock3(torch.nn.Module):
     def __init__(self,in_dim,channels):
         super(DenseBlock3,self).__init__()
-        self.conv1 = nn.Sequential(nn.Conv2d(in_dim,channels,3,1,0),
+        self.conv1 = nn.Sequential(nn.Conv2d(in_dim,channels,3,1,1),
                                    nn.LeakyReLU(),
                                    nn.BatchNorm2d(channels))
-        self.conv2 = nn.Sequential(nn.Conv2d(channels,channels,3,1,0),
+        self.conv2 = nn.Sequential(nn.Conv2d(channels,channels,3,1,1),
                                    nn.LeakyReLU(),
                                    nn.BatchNorm2d(channels))
-        self.conv3 = nn.Sequential(nn.Conv2d(channels,channels,3,1,0),
+        self.conv3 = nn.Sequential(nn.Conv2d(channels,channels,3,1,1),
                                    nn.LeakyReLU(),
                                    nn.BatchNorm2d(channels))
         # pass self init
@@ -168,10 +180,10 @@ class DenseBlock3(torch.nn.Module):
 class DenseBlock2(torch.nn.Module):
     def __init__(self,in_dim,channels):
         super(DenseBlock2,self).__init__()
-        self.conv1 = nn.Sequential(nn.Conv2d(in_dim,channels,3,1,0),
+        self.conv1 = nn.Sequential(nn.Conv2d(in_dim,channels,3,1,1),
                                     nn.LeakyReLU(),
                                     nn.BatchNorm2d(channels))
-        self.conv2 = nn.Sequential(nn.Conv2d(channels,channels,3,1,0),
+        self.conv2 = nn.Sequential(nn.Conv2d(channels,channels,3,1,1),
                                     nn.LeakyReLU(),
                                     nn.BatchNorm2d(channels))
         # pass self init
@@ -181,26 +193,76 @@ class DenseBlock2(torch.nn.Module):
         x_out = torch.cat((x0,x1),1)
         return x_out
 
-class SelfDenseNet(torch.nn.Module):
+class SelfDenseNet2(torch.nn.Module):
     def __init__(self,args):
-        super(SelfDenseNet,self).__init__()
+        super(SelfDenseNet2,self).__init__()
         self.net_cnn = nn.Sequential(
-            nn.Conv2d(1,32,3,1,0),
+            nn.Conv2d(1,64,3,1,0),
+            nn.ReLU(),
+            nn.BatchNorm2d(64,momentum=0.01),
+            nn.Conv2d(64,64,3,1,0),
+            nn.ReLU(),
+            nn.BatchNorm2d(64,momentum=0.01),
+            nn.Conv2d(64,64,5,1,2),
+            nn.ReLU(),
+            nn.BatchNorm2d(64,momentum=0.01),
+            nn.MaxPool2d(2,2),
+            nn.Dropout(0.25),
+            
+            nn.Conv2d(64,128,3,1,0),
+            nn.ReLU(),
+            nn.BatchNorm2d(128,momentum=0.01),
+            nn.Conv2d(128,128,3,1,0),
+            nn.ReLU(),
+            nn.BatchNorm2d(128,momentum=0.01),
+            nn.Conv2d(128,128,5,1,2),
+            nn.ReLU(),
+            nn.BatchNorm2d(128,momentum=0.01),
+            nn.MaxPool2d(2,2),
+            nn.Dropout(0.25),
+            
+            nn.Conv2d(128,256,3,1,0),
+            nn.ReLU(),
+            nn.BatchNorm2d(256,momentum=0.01),
+            nn.MaxPool2d(2,2),
+            nn.Dropout(0.25),
+            
+            nn.Flatten(),
+            nn.Linear(256,256),
+            nn.BatchNorm1d(256,momentum=0.01),
+            nn.Linear(256,128),
+            nn.BatchNorm1d(128,momentum=0.01),
+            nn.Linear(128,10)
+        )
+        
+    def forward(self,input_):
+        x = self.net_cnn(input_)       
+        x = torch.nn.functional.log_softmax(x,dim=-1)     
+        return x    
+    
+class SelfNetwork2(torch.nn.Module):
+    def __init__(self,args):
+        super(SelfNetwork2,self).__init__()
+        self.net_cnn = nn.Sequential(
+            nn.Conv2d(1,32,3,1,1),
             nn.LeakyReLU(),
             nn.BatchNorm2d(32),
-            nn.Conv2d(32,32,3,1,0),
+            nn.Conv2d(32,32,3,1,1),
             nn.LeakyReLU(),
             nn.BatchNorm2d(32),
+            nn.MaxPool2d(2,2),
             
             DenseBlock2(32,32),
             nn.Dropout(0.4),
-            DenseBlock2(96,32),
+            DenseBlock2(64,32),
+            nn.MaxPool2d(2,2),
             
-            DenseBlock3(96,64),
+            DenseBlock3(64,64),
             DenseBlock3(64*3,64),
             nn.Dropout(0.4),
+            nn.MaxPool2d(2,2),
             
-            nn.Conv2d(64*3,128,4,1,0),
+            nn.Conv2d(64*3,128,3,1,0),
             nn.LeakyReLU(),
             nn.BatchNorm2d(128),
             nn.Dropout(0.4),   
@@ -233,7 +295,6 @@ class SelfNetwork(torch.nn.Module):
             nn.LeakyReLU(),
             nn.BatchNorm2d(64),
             nn.MaxPool2d(2,2),
-            
             
             nn.Conv2d(64,64,7,1,3),
             nn.LeakyReLU(),
@@ -352,10 +413,19 @@ def get_optimizer(args,net):
         optimizer = torch.optim.SGD(train_vars,lr=args.lr,
                                 momentum=args.beta1,
                                 weight_decay=args.weight_decay,)
+    elif args.opt == 'rms':
+        optimizer = torch.optim.RMSprop(train_vars, lr=args.lr, 
+                                        alpha=args.beta2, eps=1e-08, weight_decay=args.weight_decay, 
+                                        momentum=0, centered=False)
     else: print('optimizer type error')
-    lr_schedule = torch.optim.lr_scheduler.MultiStepLR(optimizer,args.step,
+    if args.auto_lr_type == 'ms': 
+        lr_schedule = torch.optim.lr_scheduler.MultiStepLR(optimizer,args.step,
                                                        gamma=args.factor,
                                                       last_epoch=-1)
+    else:
+        lr_schedule = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min',
+                factor=args.factor, patience=args.patience, verbose=True, threshold=0.0001,
+                threshold_mode='rel', cooldown=0, min_lr=1e-5, eps=1e-08)
     return optimizer,lr_schedule
 
         
@@ -368,6 +438,8 @@ def print_terminal(loss,i,epoch,len_data,loss_total):
 # body part
 def main():
     SEED = 0
+    
+    random.seed(SEED)# add this line when using torchvision's transforms
     torch.manual_seed(SEED)
     torch.cuda.manual_seed(SEED)
     torch.backends.cudnn.deterministic = True
@@ -376,7 +448,8 @@ def main():
     train_data,val_data = loader_factory('train&&val',args)
     test_data = loader_factory('test',args)
     
-    net = SelfNetwork(args)
+    net = SelfDenseNet2(args)
+    print(net)
     #net = SelfDenseNet(args)
     #net = CNN()
     net = torch.nn.DataParallel(net,args.gpu).cuda()
@@ -390,6 +463,7 @@ def main():
         len_train = len(train_data)
         net.train()
         correct = 0
+        img_count = 0
         accuracy = 0
         for i,(images, label) in enumerate(train_data):
             images = images.cuda()
@@ -398,23 +472,28 @@ def main():
             
             pred = output.data.max(1 , keepdim=True)[1]            
             correct += pred.eq(label.max(1, keepdim=True)[1].data.view_as(pred)).sum().cpu().numpy()
+            img_count += images.shape[0]
                     
             loss = loss_function(output,label)
             loss_train_total += loss
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            lr_schedule.step()
+            if args.auto_lr_type == 'ms':
+                lr_schedule.step()
             if i % args.print_fre == 0:
                 print_terminal(loss,i,epoch,len_train,loss_train_total)
-        accuracy = correct / (len_train*args.batch_size)
+        accuracy = correct / img_count
         print(accuracy)
         # val
+        if val_data == 0:
+            continue
         loss_val_total = 0
-        len_val = len(val_data)
-        net.eval()  
+        net.eval() 
+        val_img_count = 0
         val_correct = 0
         val_accuracy = 0
+        len_val = len(val_data)
         with torch.no_grad():
             for i, (images,label) in enumerate(val_data):
                 images = images.cuda()
@@ -425,12 +504,14 @@ def main():
                             
                 pred = output.data.max(1 , keepdim=True)[1]
                 val_correct += pred.eq(label.max(1, keepdim=True)[1].data.view_as(pred)).sum().cpu().numpy()
-                           
+                val_img_count += images.shape[0]           
                 if i%args.print_fre == 0:
                     print_terminal(loss,i,epoch,len_val,loss_val_total)
-            val_accuracy = val_correct / (len_val*args.batch_size)
+            val_accuracy = val_correct / val_img_count
             print(val_accuracy)
-        loss_val_total /= len(val_data)
+        loss_val_total /= len_val
+        if args.auto_lr_type != 'ms':
+            lr_schedule.step(loss_val_total)
         #save
         if loss_val_total < loss_val_min:
             states = { 
