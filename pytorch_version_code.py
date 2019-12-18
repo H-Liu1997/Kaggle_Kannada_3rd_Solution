@@ -16,19 +16,19 @@ from sklearn.model_selection import KFold
 # For example, running this (by clicking run or pressing Shift+Enter) will list all files under the input directory
       
 class args(object):
-    # -------- network --------
+    # ----------------------------------- network ----------------------------------- #
     opt = 'rms'
-    batch_size = 256#256#16
-    lr = 3e-4
+    batch_size = 1024#256#16
+    lr = 1e-4
     beta1 = 0.9
     beta2 = 0.999
-    weight_decay = 1e-4#1e-4
-    epoch = 40
-    factor= 0.2
+    weight_decay = 0#1e-4
+    epoch = 56#40#62
+    factor= 0.25#0.1
     step = [2000,2500,2700]
     patience = 3
     auto_lr_type = 'auto'
-    # -------- data ---------
+    # -----------------------------------  data ------------------------------------ #
     train_path = '/kaggle/input/Kannada-MNIST/train.csv'
     val_path = '/kaggle/input/Kannada-MNIST/Dig-MNIST.csv'
     test_path = '/kaggle/input/Kannada-MNIST/test.csv'
@@ -37,26 +37,40 @@ class args(object):
     weight_save_path = '/kaggle/working/best.pth'
     aug_train = True
     crop_padding = 3
-    scale = (0.60,1.40)
-    shear = 0.15
-    shift = (0.15,0.15)
-    angle = (-15,15)
+    scale = (0.60,1.40)#(0.75,1.25)
+    shear = 0.15#0.10
+    shift = (0.15,0.15)#(0.25,0.25)
+    angle = (-15,15)#(-10,10)
     n_splits = 5
     n_times = 3 
-    #--------- other --------
+    # -----------------------------------  other ------------------------------------ #
     SEED = 0
-    print_fre = 200
+    print_fre = 50#200#1
     gpu = [0]
     test_number = 0
     test_only = False
-    #-------- tricks --------
-    #warm_up
-    #model_embedding
-    #no_bias_decay
+    # -----------------------------------  tricks ------------------------------------ #
+    # already test in pytorch ×7
     multi_lr = False
-    #mix_up
+    warm_up = False
+    focus_loss = False
+    pseudo_label = False
+    all_data = False
+    small_batch_size = False
+    no_bias_decay = False
+    
+    # already test in keras ×3
+    #label_smoothing 
+    #model_embedding
+    #6 * TTA
+    
+    # TODO:(not test ×6)
     #cosine lr decay
-    #other preprocess
+    #mix_up
+    #center loss
+    #autoaugmention
+    #autoML
+    #zero Gamma
     
 def SelfKFold(args):
     '''
@@ -102,7 +116,6 @@ class SelfDataSet(torch.utils.data.Dataset):
                                          np.array(test_label.iloc[:],dtype='float32')),0)
         elif labels is not None:
             self.data_image = images.reshape(-1,28,28,1)
-          # values useless
             self.label = labels
            
         else:
@@ -110,18 +123,14 @@ class SelfDataSet(torch.utils.data.Dataset):
             self.label = None
                                   
     def __getitem__(self,index):
-        #print('here')
         ori_img = self.data_image[index] 
-        #print('here2')
         pre_img = self.augmentation(ori_img)    
         if self.label is None:
             return pre_img
         else:
             label_onehot = np.zeros(10, dtype='float32')
-            #print('here3')
             #print(self.label.shape)
             label_onehot[self.label[index]] = 1
-            #print('here4')
             return pre_img,label_onehot
         
     def __len__(self): 
@@ -205,7 +214,8 @@ def loader_factory(data_type,args,train_image=None,train_label=None,val_image=No
     else: print('error,which kind of data you want?')
 
 
-        
+# self densenet, not be used in final 
+# -----------------------------------  self densenet start -------------------------------------- #    
 class DenseBlock3(torch.nn.Module):
     def __init__(self,in_dim,channels):
         super(DenseBlock3,self).__init__()
@@ -242,9 +252,51 @@ class DenseBlock2(torch.nn.Module):
         x_out = torch.cat((x0,x1),1)
         return x_out
 
-class SelfDenseNet2(torch.nn.Module):
+class SelfDenseNet(torch.nn.Module):
+    '''
+    I didn't rewrite the init portion of this network
+    '''
     def __init__(self,args):
-        super(SelfDenseNet2,self).__init__()
+        super(SelfDenseNet,self).__init__()
+        self.net_cnn = nn.Sequential(
+            nn.Conv2d(1,32,3,1,1),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(32),
+            nn.Conv2d(32,32,3,1,1),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(32),
+            nn.MaxPool2d(2,2),
+            
+            DenseBlock2(32,32),
+            nn.Dropout(0.4),
+            DenseBlock2(64,32),
+            nn.MaxPool2d(2,2),
+            
+            DenseBlock3(64,64),
+            DenseBlock3(64*3,64),
+            nn.Dropout(0.4),
+            nn.MaxPool2d(2,2),
+            
+            nn.Conv2d(64*3,128,3,1,0),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(128),
+            nn.Dropout(0.4),   
+        )
+        self.fc1 = nn.Linear(128,10)
+        
+    def forward(self,input_):
+        x = self.net_cnn(input_)       
+        x = x.view(x.size(0),-1)
+        x = torch.nn.functional.softmax(self.fc1(x),dim=-1)     
+        return x
+
+# -----------------------------------  self densenet end -------------------------------------- # 
+
+
+# -----------------------------------  self baseline 2 start -------------------------------------- #
+class SelfNet2(torch.nn.Module):
+    def __init__(self,args):
+        super(SelfNet2,self).__init__()
         self.net_cnn = nn.Sequential(
             nn.Conv2d(1,64,3,1,0),
             nn.ReLU(),
@@ -276,12 +328,13 @@ class SelfDenseNet2(torch.nn.Module):
             nn.MaxPool2d(2,2),
             nn.Dropout(0.25),
             
+            #nn.Flatten(),
+            nn.Conv2d(256,256,1,1,0),
+            nn.BatchNorm2d(256,momentum=0.01),
+            nn.Conv2d(256,128,1,1,0),
+            nn.BatchNorm2d(128,momentum=0.01),
+            nn.Conv2d(128,10,1,1,0),
             nn.Flatten(),
-            nn.Linear(256,256),
-            nn.BatchNorm1d(256,momentum=0.01),
-            nn.Linear(256,128),
-            nn.BatchNorm1d(128,momentum=0.01),
-            nn.Linear(128,10)
         )
         self.initilization()
         
@@ -298,79 +351,14 @@ class SelfDenseNet2(torch.nn.Module):
         x = self.net_cnn(input_)       
         x = torch.nn.functional.softmax(x,dim=-1)     
         return x    
-    
-class SelfNetwork2(torch.nn.Module):
+# -----------------------------------  self baseline 2 end   -------------------------------------- #   
+
+# -----------------------------------  self baseline 1 start -------------------------------------- #    
+       
+class SelfNet(torch.nn.Module):
     def __init__(self,args):
-        super(SelfNetwork2,self).__init__()
+        super(SelfNet,self).__init__()
         self.net_cnn = nn.Sequential(
-            nn.Conv2d(1,32,3,1,1),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(32),
-            nn.Conv2d(32,32,3,1,1),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(32),
-            nn.MaxPool2d(2,2),
-            
-            DenseBlock2(32,32),
-            nn.Dropout(0.4),
-            DenseBlock2(64,32),
-            nn.MaxPool2d(2,2),
-            
-            DenseBlock3(64,64),
-            DenseBlock3(64*3,64),
-            nn.Dropout(0.4),
-            nn.MaxPool2d(2,2),
-            
-            nn.Conv2d(64*3,128,3,1,0),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(128),
-            nn.Dropout(0.4),   
-        )
-        self.fc1 = nn.Linear(128,10)
-        
-    def forward(self,input_):
-        x = self.net_cnn(input_)       
-        x = x.view(x.size(0),-1)
-        x = torch.nn.functional.log_softmax(self.fc1(x),dim=-1)     
-        return x
-        
-class SelfNetwork(torch.nn.Module):
-    def __init__(self,args):
-        super(SelfNetwork,self).__init__()
-        self.net_cnn = nn.Sequential(
-            nn.Conv2d(1,32,3,1,1),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(32),
-            nn.Conv2d(32,32,3,1,1),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(32),
-            nn.MaxPool2d(2,2),
-            
-            nn.Conv2d(32,32,5,1,2),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(32),
-            nn.Dropout(0.4),
-            nn.Conv2d(32,64,5,1,2),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(64),
-            nn.MaxPool2d(2,2),
-            
-            nn.Conv2d(64,64,7,1,3),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(64),
-            nn.Conv2d(64,64,7,1,3),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(64),
-            nn.Dropout(0.4),
-            nn.MaxPool2d(2,2),
-            
-            nn.Conv2d(64,128,3,1,0),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(128),
-            nn.Dropout(0.4),   
-        )
-        self.fc1 = nn.Linear(128,10)
-        '''self.net_cnn = nn.Sequential(
             nn.Conv2d(1,32,3,1,0),
             nn.LeakyReLU(),
             nn.BatchNorm2d(32),
@@ -420,7 +408,7 @@ class SelfNetwork(torch.nn.Module):
             nn.BatchNorm2d(128),
             nn.Dropout(0.4),   
         )
-        self.fc1 = nn.Linear(128,10)'''
+        self.fc1 = nn.Linear(128,10)
         #self.initilization()
         
     def initilization(self):# init checked
@@ -436,18 +424,28 @@ class SelfNetwork(torch.nn.Module):
         x = torch.nn.functional.softmax(self.fc1(x),dim=-1)     
         return x
 
+# -----------------------------------  self baseline 1 end -------------------------------------- #
+
 
 class MyLoss(torch.nn.Module):
     def __init__(self):
         super().__init__()
     
     def forward(self,x,y):
-        #TODO: here add focus loss
         loss = -(y*torch.log(x)).cpu().sum(1)
         loss = loss.mean()
         return loss
+
+class MyLossFocus(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+  
+    def forward(self,x,y):
+        loss = -(y*torch.log(x)*torch.power((y-x),2)).cpu().sum(1)
+        loss = loss.mean()
+        return loss
         
-        
+
 def get_optimizer(args,net):
     
     if args.multi_lr:
@@ -487,12 +485,46 @@ def get_optimizer(args,net):
                 threshold_mode='rel', cooldown=3, min_lr=1e-6, eps=1e-08)
     return optimizer,lr_schedule
 
-        
+def get_optimizer_pretrain(args,net):
+    
+    if args.multi_lr:
+        decay_1, no_decay_2 = [],[]
+        for name, param in net.named_parameters():           
+            if name.endswith(".bias"):
+                print(name[7:],"using no_decay_2")
+                no_decay_2.append(param)
+            else:
+                decay_1.append(param)
+        train_vars = [{'params': decay_1, 'lr': args.lr, 'weight_decay':args.weight_decay},
+                     {'params': no_decay_2, 'lr': args.lr, 'weight_decay':0},]
+    else:
+        train_vars = [param for param in net.parameters() if param.requires_grad]
+                
+    if args.opt == 'adam':
+        optimizer = torch.optim.Adam(train_vars,lr=args.lr,
+                                betas=(args.beta1, args.beta2),
+                                eps=1e-08, 
+                                weight_decay=args.weight_decay,)
+    elif args.opt == 'sgd':
+        optimizer = torch.optim.SGD(train_vars,lr=args.lr,
+                                momentum=args.beta1,
+                                weight_decay=args.weight_decay,)
+    elif args.opt == 'rms':
+        optimizer = torch.optim.RMSprop(train_vars, lr=args.lr, 
+                                        alpha=args.beta1, eps=1e-07, weight_decay=args.weight_decay, 
+                                        momentum=0, centered=False)
+    else: print('optimizer type error')
+    lr_lambda = lambda iterations: iterations / 159
+    lr_schedule = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch=-1)
+   
+    return optimizer,lr_schedule
+
+
 def print_terminal(loss,i,epoch,len_data,loss_total):
     str_print = 'epoch: [{0}]{1}/{2}'.format(epoch,i,len_data)
     str_print += ' loss: {loss:.5f}({loss_avg:.5f})'.format(loss=loss,loss_avg=loss_total/(i+1e-10))
     print(str_print)
-          
+
 
 def test_(net,weight_path,test_data,weight_save_path):
     state = torch.load(weight_path)
@@ -626,11 +658,7 @@ def main(args):
     if args.test_only:
         test_(net,args.weight_path,test_data,args.weight_save_path)
     
-    
-    
-
-    
-    
+#     pseudo_label portion
 #     traintest_data = loader_factory('test_train',args)
 #     net2 = SelfNetwork(args)
 #     #net = CNN()
@@ -698,15 +726,16 @@ def main(args):
 #     submission.to_csv('submission.csv', index=False)
 #     submission.head()
 
-
-
-            
+           
 if __name__=='__main__':
+    '''
+    you can test different parameters in one commit.
+    '''
     args = args()
     main(args)
-    #args.weight_save_path = '/kaggle/working/best_1.pth'
-    #args.split = 0  
-   # main(args)
+    args.weight_save_path = '/kaggle/working/best_1.pth'
+    args.split = 0  
+    main(args)
 #     submission = pd.read_csv('/kaggle/input/pytorch-kannada-mnist/submission0.csv')
 #     submission.to_csv('/kaggle/working/submission.csv', index=False)
 #     submission.head()
