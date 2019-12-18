@@ -39,6 +39,12 @@ Only the most basic model and tricks has been used.<br>
 3. choose no weight decay in final, so no bias decay not use
 4. other tricks in the code, not use because useless in this competitions
 
+## Other Notes
+1. When test, don't train your model again. Save your weight and just read them during test.
+2. Trust your local cv, and trust youself. I fixed the random seed in the beginning and never change it. And even thouth we fix the random seed, we still need try to identify some method really work or not. Ex. after changing the momentium of batchnorm layer from 0.01 to 0.1, the result change to 98.340 from 98.800. when we swith to another model, the result change to 99.720 from 99.700. So, my conclusion is momentium of batchnorm don't have big influence.
+3. try better TTA may improve the acc
+4. using better baseline model may boom up the acc, for this competition, I just want to implement and test tricks in competitions. I have try the MobileNet V3, selfDensenet but results are not so good(I think becasue this task is too sample), I think using NAS to find best model and add tricks is best choice. 
+
 
 
 
