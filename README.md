@@ -1,4 +1,10 @@
-# Kaggle_Kannada_MNIST_Pytorch&&Keras
+<div align=center>
+ 
+# Kaggle Kannada MNIST Pytorch&&Keras
+
+[![license](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/HaiyangLiu1997/Pytorch-Networks/blob/master/LICENSE)
+[![stars](https://img.shields.io/github/stars/HaiyangLiu1997/Pytorch-Networks.svg)](https://github.com/HaiyangLiu1997/Pytorch-Networks/stargazers)
+</div>
 
 The 3rd solution code for kaggle kannada MNIST playground challenge.<br>
 I use it to familiarize myself with the competitions in kaggle.<br>
