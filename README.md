@@ -1,6 +1,6 @@
 <div align=center>
  
-# Kaggle Kannada MNIST Pytorch&&Keras
+# Kaggle Kannada MNIST 3rd Solution
 
 [![license](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/HaiyangLiu1997/Kaggle_Kannada_MNIST_Pytorch-Keras/blob/master/LICENSE)
 [![stars](https://img.shields.io/github/stars/HaiyangLiu1997/Kaggle_Kannada_MNIST_Pytorch-Keras.svg)](https://github.com/HaiyangLiu1997/Kaggle_Kannada_MNIST_Pytorch-Keras/stargazers)
